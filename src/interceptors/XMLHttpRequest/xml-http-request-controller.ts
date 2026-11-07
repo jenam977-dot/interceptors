@@ -329,32 +329,53 @@ export class XMLHttpRequestController {
     })
 
     // 1. Fire a progress event named loadstart at this with 0 and 0.
-    this.trigger('loadstart', this.request, { loaded: 0, total: 0 })
+    // The total length of the response body is only computable when the
+    // response declares a "content-length" header (e.g. not for streamed
+    // responses), so report that alongside the event.
+    this.trigger('loadstart', this.request, {
+      loaded: 0,
+      total: 0,
+      lengthComputable: response.headers.has('content-length'),
+    })
 
     // 2. Let requestBodyTransmitted be 0.
     let requestBodyTransmitted = 0
     let uploadComplete = false
 
     if (this[kFetchRequest]) {
-      const requestBodyLength = await getBodyByteLength(
-        this[kFetchRequest].clone()
+      const fetchRequest = this[kFetchRequest]
+      /**
+       * @note Calculating the request body length may fail (e.g. the body
+       * cannot be buffered). In that case the total length is unknown and
+       * the upload progress events must report so.
+       * @see https://github.com/mswjs/interceptors/issues/617
+       */
+      const [requestBodyLengthError, requestBodyLength] = await until(() =>
+        getBodyByteLength(fetchRequest.clone())
       )
+      const isRequestLengthComputable =
+        requestBodyLengthError == null && requestBodyLength != null
 
       // 5. If this’s upload complete flag is unset and this’s upload listener flag is set, then fire a progress event named loadstart at this’s upload object with requestBodyTransmitted and requestBodyLength.
       if (!uploadComplete) {
         this.trigger('loadstart', this.request.upload, {
           loaded: 0,
-          total: requestBodyLength,
+          total: requestBodyLength ?? 0,
+          lengthComputable: isRequestLengthComputable,
         })
       }
 
       const processRequestBodyChunkLength = (bytesLength: number) => {
         requestBodyTransmitted += bytesLength
 
-        if (requestBodyTransmitted < requestBodyLength) {
+        if (
+          requestBodyLength != null &&
+          requestBodyTransmitted < requestBodyLength
+        ) {
           this.trigger('progress', this.request.upload, {
             loaded: requestBodyTransmitted,
             total: requestBodyLength,
+            lengthComputable: isRequestLengthComputable,
           })
         }
       }
@@ -364,15 +385,18 @@ export class XMLHttpRequestController {
 
         this.trigger('progress', this.request.upload, {
           loaded: requestBodyTransmitted,
-          total: requestBodyLength,
+          total: requestBodyLength ?? 0,
+          lengthComputable: isRequestLengthComputable,
         })
         this.trigger('load', this.request.upload, {
           loaded: requestBodyTransmitted,
-          total: requestBodyLength,
+          total: requestBodyLength ?? 0,
+          lengthComputable: isRequestLengthComputable,
         })
         this.trigger('loadend', this.request.upload, {
           loaded: requestBodyTransmitted,
-          total: requestBodyLength,
+          total: requestBodyLength ?? 0,
+          lengthComputable: isRequestLengthComputable,
         })
       }
 
@@ -380,7 +404,20 @@ export class XMLHttpRequestController {
         const reader = this[kFetchRequest].body.getReader()
 
         while (true) {
-          const { value, done } = await reader.read()
+          let readResult: ReadableStreamReadResult<Uint8Array>
+
+          try {
+            readResult = await reader.read()
+          } catch {
+            /**
+             * @note The request body could not be read (e.g. its stream
+             * errored). End the upload with whatever was transmitted so far.
+             */
+            processRequestEndOfBody()
+            break
+          }
+
+          const { value, done } = readResult
 
           if (done) {
             processRequestEndOfBody()
@@ -431,7 +468,10 @@ export class XMLHttpRequestController {
       /**
        * @note The response body length is derived ONLY from the "content-length" header.
        * If that response header is not set, the "total" in all progress events must be 0.
+       * The total length is then not computable (e.g. a streamed response).
+       * @see https://github.com/mswjs/interceptors/issues/617
        */
+      const isResponseLengthComputable = response.headers.has('content-length')
       const responseBodyLength = Number(
         response.headers.get('content-length') ?? '0'
       )
@@ -462,6 +502,7 @@ export class XMLHttpRequestController {
         this.trigger('progress', this.request, {
           loaded: receivedBytes,
           total: responseBodyLength,
+          lengthComputable: isResponseLengthComputable,
         })
       }
 
@@ -483,11 +524,13 @@ export class XMLHttpRequestController {
         this.trigger('load', this.request, {
           loaded: transmitted,
           total: responseBodyLength,
+          lengthComputable: isResponseLengthComputable,
         })
         // 11. Fire a progress event named loadend at xhr with transmitted and length.
         this.trigger('loadend', this.request, {
           loaded: transmitted,
           total: responseBodyLength,
+          lengthComputable: isResponseLengthComputable,
         })
       }
 

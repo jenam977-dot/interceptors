@@ -23,3 +23,24 @@ it('returns the ProgressEvent instance', () => {
   expect(event.loaded).toBe(100)
   expect(event.total).toBe(500)
 })
+
+it('defaults "lengthComputable" to true', () => {
+  const event = createEvent(request, 'load', {
+    loaded: 100,
+    total: 500,
+  })
+
+  expect(event).toBeInstanceOf(ProgressEvent)
+  expect(event.lengthComputable).toBe(true)
+})
+
+it('respects an explicit "lengthComputable" value', () => {
+  const event = createEvent(request, 'loadstart', {
+    loaded: 0,
+    total: 0,
+    lengthComputable: false,
+  })
+
+  expect(event).toBeInstanceOf(ProgressEvent)
+  expect(event.lengthComputable).toBe(false)
+})
